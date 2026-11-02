@@ -1,0 +1,13 @@
+{
+  "name": "mcpstamp-check",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "McpStamp Check: readiness score and badge for remote MCP servers",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "engines": { "node": ">=20" }
+}

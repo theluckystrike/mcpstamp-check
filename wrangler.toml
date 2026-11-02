@@ -1,0 +1,31 @@
+name = "mcpstamp-check"
+main = "src/worker.mjs"
+compatibility_date = "2025-09-01"
+# Subrequests to hosts on our own zone (mcp.zovo.one) go through the public front door,
+# so checking our own MCP servers reaches the mcp-remote Worker like any other client.
+compatibility_flags = ["global_fetch_strictly_public"]
+account_id = "dd3f2a29b7707e21a87f26a622c0bb9d"
+workers_dev = true
+
+# mcp-billing owns mcp.zovo.one as a custom domain; a route pattern is more specific,
+# so /stamp* lands here (same mechanism as mcp-remote's /mcp* routes).
+routes = [
+  { pattern = "mcp.zovo.one/stamp*", zone_name = "zovo.one" },
+]
+
+# Results: r:<id> (one write per live check, 30-day TTL) and u:<sha256(url)> -> id.
+[[kv_namespaces]]
+binding = "RESULTS"
+id = "474312dfcc5c4e6a8b599f3e25f03fa5"
+
+# Burst guard per client IP (the hourly 20-check limit is a Cache API counter).
+[[ratelimits]]
+name = "BURST"
+namespace_id = "110201"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+[observability]
+enabled = true
