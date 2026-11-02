@@ -298,13 +298,16 @@ test('P2-13/14: a 403 HTML firewall page on initialize is blocked_by_firewall, n
   const r = await checkServer('https://mcp.example.com/mcp', { fetch: f });
   assert.equal(r.reachable, false);
   assert.equal(r.error_code, 'blocked_by_firewall');
-  assert.match(r.error, /firewall or bot protection/);
+  assert.match(r.error, /firewall, bot protection or access rule/);
   assert.doesNotMatch(r.error, /sign-in required|sign in|use MCP OAuth|try again/i);
   assert.ok(r.checks.every((c) => !/Use MCP OAuth/.test(c.fix || '')));
   assert.equal(f.calls.length, 1);
   assert.equal(isFirewall({ status: 403, headers: {}, contentType: 'application/json', text: '{}' }), false);
   assert.equal(isFirewall({ status: 403, headers: { 'www-authenticate': 'Bearer' }, contentType: 'text/html', text: '<html>' }), false);
   assert.equal(isFirewall({ status: 429, headers: { 'cf-mitigated': 'challenge' }, contentType: 'text/html', text: '' }), true);
+  // plain-text access-rule page (httpbin.org "Forbidden redirect URL") is a block page, not a credential gate
+  assert.equal(isFirewall({ status: 403, headers: {}, contentType: 'text/plain', text: 'Forbidden redirect URL.' }), true);
+  assert.equal(isFirewall({ status: 403, headers: {}, contentType: '', text: '{"message":"Forbidden"}' }), false);
 });
 
 test('P2-13/14: a firewall page on tools/list is "blocked", not "needs authorization"', async () => {
@@ -333,7 +336,7 @@ test('P2-13/14: the API answers 502 blocked_by_firewall with the honest message'
     assert.equal(res.status, 502);
     const b = await res.json();
     assert.equal(b.error, 'blocked_by_firewall');
-    assert.match(b.detail, /firewall or bot protection/);
+    assert.match(b.detail, /firewall, bot protection or access rule/);
     assert.equal(store.size, 0);
   } finally {
     globalThis.fetch = realFetch;

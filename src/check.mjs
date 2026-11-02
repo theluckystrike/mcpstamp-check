@@ -213,8 +213,10 @@ function headerObj(h) {
 }
 
 /**
- * True when a response is a firewall, WAF or bot-protection block page rather than the server:
- * Cloudflare's cf-mitigated header, or a 403 HTML page without WWW-Authenticate.
+ * True when a response is a firewall, WAF, bot-protection or access-rule block page rather than an
+ * MCP or sign-in answer: Cloudflare's cf-mitigated header, or a 403 without WWW-Authenticate whose
+ * body is not JSON (HTML or plain-text "Forbidden" pages). A 403 with a JSON body stays a
+ * credential gate (API gateways answer {"message":"Forbidden"} for a missing key).
  */
 export function isFirewall(r) {
   if (!r || r.status === undefined) return false;
@@ -222,13 +224,17 @@ export function isFirewall(r) {
   if (h['cf-mitigated']) return true;
   if (r.status !== 403 || h['www-authenticate']) return false;
   const ct = r.contentType || '';
-  return ct.includes('text/html') || /^\s*</.test(r.text || '');
+  if (ct.includes('json')) return false;
+  const body = String(r.text || '').trim();
+  return !(body.startsWith('{') || body.startsWith('['));
 }
 
 function firewallLabel(r) {
   const h = r.headers || {};
   const who = h['cf-mitigated'] || /cloudflare/i.test(h.server || '') ? 'Cloudflare ' : '';
-  return `HTTP ${r.status} ${who}${h['cf-mitigated'] ? `${h['cf-mitigated']} page` : 'HTML block page'}`;
+  if (h['cf-mitigated']) return `HTTP ${r.status} ${who}${h['cf-mitigated']} page`;
+  const ct = (r.contentType || '').split(';')[0] || 'no content type';
+  return `HTTP ${r.status} ${who}${ct.includes('html') ? 'HTML' : ct} block page`;
 }
 
 class Ctx {
@@ -464,7 +470,7 @@ export async function checkServer(url, opts = {}) {
     return finish({
       reachable: false,
       code: 'blocked_by_firewall',
-      error: `blocked_by_firewall: ${s.firewall} from a firewall or bot protection instead of an MCP response. The request never reached the MCP server, so nothing could be scored. Store clients connect from their own IP ranges and can hit the same block: allow Anthropic (160.79.104.0/21), OpenAI and Google egress ranges on the MCP and OAuth paths, or exempt those paths from bot challenges.`,
+      error: `blocked_by_firewall: ${s.firewall} from a firewall, bot protection or access rule instead of an MCP response. The request never reached the MCP server, so nothing could be scored. Store clients connect from their own IP ranges and can hit the same block: allow Anthropic (160.79.104.0/21), OpenAI and Google egress ranges on the MCP and OAuth paths, or exempt those paths from bot challenges.`,
     });
   }
   s.initMsg = rpcMessage(init, 1);
@@ -632,7 +638,7 @@ function evaluate(s, ctx) {
     return out;
   }
   if (s.firewall) {
-    for (const c of CHECKS) if (!out[c.id]) set(c.id, 'skip', `Not checked: ${s.firewall} from a firewall or bot protection`, null, { reason: BLOCKED });
+    for (const c of CHECKS) if (!out[c.id]) set(c.id, 'skip', `Not checked: ${s.firewall} from a firewall, bot protection or access rule`, null, { reason: BLOCKED });
     return out;
   }
 
