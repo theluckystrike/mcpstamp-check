@@ -14,6 +14,72 @@ After a check, embed your badge in your README (`<id>` is in the check result):
 
 The badge shows `McpStamp | 87 B`, coloured by grade, or a grey `unchecked`.
 
+## MCP server
+
+McpStamp Check is itself a remote MCP server (Streamable HTTP, protocol 2025-11-25, no sign-in):
+
+```
+https://mcp.zovo.one/stamp/mcp
+```
+
+| Tool | What it does |
+|---|---|
+| `check_mcp_server(url, fresh?)` | Score, grade, readiness per store, every failing check with its fix, report URL and badge markdown |
+| `explain_check(check_id)` | What a check means, which stores it blocks, and the store or spec source |
+
+Add it to your client:
+
+```sh
+# Claude Code
+claude mcp add --transport http mcpstamp https://mcp.zovo.one/stamp/mcp
+```
+
+```jsonc
+// Cursor: ~/.cursor/mcp.json
+{ "mcpServers": { "mcpstamp": { "url": "https://mcp.zovo.one/stamp/mcp" } } }
+
+// VS Code: .vscode/mcp.json
+{ "servers": { "mcpstamp": { "type": "http", "url": "https://mcp.zovo.one/stamp/mcp" } } }
+```
+
+Then ask: "Check https://example.com/mcp with McpStamp". Live checks share the API limit (20 per hour per client). It is listed in the MCP Registry as `io.github.theluckystrike/mcpstamp-check`.
+
+## GitHub Action
+
+Gate your CI on readiness. The action calls the public API, writes a job summary (score, stores, fixes) and fails the step when the score is below `min-score` or a store in `fail-on-store` is not ready.
+
+```yaml
+name: McpStamp Check
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  mcpstamp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: theluckystrike/mcpstamp-check@v1
+        id: stamp
+        with:
+          url: https://example.com/mcp
+          min-score: 80
+          fail-on-store: claude,chatgpt
+      - run: echo "Score ${{ steps.stamp.outputs.score }} (${{ steps.stamp.outputs.grade }}): ${{ steps.stamp.outputs.report-url }}"
+```
+
+| Input | Default | Meaning |
+|---|---|---|
+| `url` | (required) | The https URL of your MCP endpoint |
+| `min-score` | `0` | Fail when the score is below this value |
+| `fail-on-store` | empty | Comma list of `claude`, `chatgpt`, `gemini`, `registry` that must be ready (a store whose blocking checks could not run, for example tools behind sign-in, is not ready) |
+| `fresh` | `true` | `false` accepts a result up to 10 minutes old. On a rate limit the action falls back to the cached result |
+| `api-base` | `https://mcp.zovo.one/stamp` | API base URL |
+
+Outputs: `score`, `grade`, `report-url`, `badge-url`, `ready-stores`.
+
+The action is a composite action that runs `action/run.mjs` with the runner's Node.js (18 or later), with no dependencies and no build step. Check a deployed URL: run it after your deploy step.
+
 ## API
 
 Base URL: `https://mcp.zovo.one/stamp` (also proxied at `https://www.mcpstamp.com/api/`).
@@ -24,9 +90,10 @@ Base URL: `https://mcp.zovo.one/stamp` (also proxied at `https://www.mcpstamp.co
 | `GET /api/result/<id>` | Last stored result, 404 if none |
 | `GET /api/checks` | The check table below |
 | `GET /badge?url=<url>` or `GET /badge/<id>.svg` | SVG badge |
+| `POST /mcp` | MCP Streamable HTTP endpoint (see above) |
 
 Errors: `400 {error:"bad_url"|"blocked_host"}`, `429 {error:"rate_limited", retry_after}`, `502 {error:"unreachable", detail}`.
-Limits: 20 live checks per hour per IP; at most 5 HTTP requests to the checked server per check; 8 s timeout and 1 MB body cap per request; https only, ports 443/8443, no IP literals or private names, max 3 redirects (each re-validated).
+Limits: 20 live checks per hour per IP; at most 6 HTTP requests to the checked server per check; 8 s timeout and 1 MB body cap per request; https only, ports 443/8443, no IP literals or private names, max 3 redirects (each re-validated).
 
 ## Proxies
 
@@ -34,7 +101,7 @@ A trusted proxy (the mcpstamp.com Pages Functions) may send `x-mcpstamp-proxy-ke
 
 ## Scoring
 
-Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Score = weighted pass ratio over the checks that apply. Grades: A >= 90, B >= 80, C >= 65, D >= 50, else F. A store is **ready** when none of its blocking checks fail. When the tools sit behind sign-in and cannot be inspected, the score is capped at 85.
+Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Score = weighted pass ratio over the checks that apply. Grades: A >= 90, B >= 80, C >= 65, D >= 50, else F. Each store gets `status`: `ready` (no blocking check failed and none was skipped), `unverified` (none failed, but a blocking check could not run, for example tools behind sign-in) or `not_ready` (a blocking check failed). `ready` is true only for `ready`. When the tools sit behind sign-in and cannot be inspected, the score is capped at 85.
 
 | Check | Group | What it tests | Weight | Counts for | Blocks |
 |---|---|---|---|---|---|
@@ -80,7 +147,7 @@ CLI: `node scripts/check-cli.mjs https://example.com/mcp [--json]`
 ## Develop
 
 ```sh
-npm test             # node --test, mock fetch, no network
+npm test             # node --test, mock fetch, no network (engine, Worker, MCP endpoint, action)
 npx wrangler deploy  # Worker "mcpstamp-check"
 ```
 

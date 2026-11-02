@@ -1,0 +1,57 @@
+name: McpStamp Check
+description: Score a remote MCP server for Claude, ChatGPT, Gemini and MCP Registry readiness, and gate CI on it.
+author: theluckystrike
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  url:
+    description: The https URL of the MCP endpoint to check, for example https://example.com/mcp
+    required: true
+  min-score:
+    description: Fail the step when the score (0-100) is below this value. 0 never fails on score.
+    required: false
+    default: '0'
+  fail-on-store:
+    description: 'Comma-separated stores that must be ready: claude, chatgpt, gemini, registry. Empty = no store gate.'
+    required: false
+    default: ''
+  fresh:
+    description: 'true = always run a new check; false = accept a result up to 10 minutes old.'
+    required: false
+    default: 'true'
+  api-base:
+    description: McpStamp Check API base URL.
+    required: false
+    default: https://mcp.zovo.one/stamp
+
+outputs:
+  score:
+    description: Score 0-100
+    value: ${{ steps.check.outputs.score }}
+  grade:
+    description: Grade A-F
+    value: ${{ steps.check.outputs.grade }}
+  report-url:
+    description: Public report URL on mcpstamp.com
+    value: ${{ steps.check.outputs.report-url }}
+  badge-url:
+    description: SVG badge URL for your README
+    value: ${{ steps.check.outputs.badge-url }}
+  ready-stores:
+    description: Comma-separated stores that are ready
+    value: ${{ steps.check.outputs.ready-stores }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_MIN_SCORE: ${{ inputs.min-score }}
+        INPUT_FAIL_ON_STORE: ${{ inputs.fail-on-store }}
+        INPUT_FRESH: ${{ inputs.fresh }}
+        INPUT_API_BASE: ${{ inputs.api-base }}
+      run: node "$GITHUB_ACTION_PATH/action/run.mjs"

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkServer, CHECKS, gradeFor, parseWwwAuthenticate, STORES, LIMITED_CAP } from '../src/check.mjs';
+import { checkServer, CHECKS, gradeFor, parseWwwAuthenticate, STORES, LIMITED_CAP, DEFAULT_MAX_REQUESTS } from '../src/check.mjs';
 
 const URL0 = 'https://mcp.example.com/mcp';
 const goodTool = (name, extra = {}) => ({
@@ -74,8 +74,8 @@ test('good open server scores A and is ready everywhere', async () => {
   assert.equal(r.auth, 'none');
   assert.equal(r.grade, 'A');
   assert.equal(r.score, 100);
-  for (const s of STORES) assert.equal(r.stores[s].ready, true, s);
-  assert.ok(f.calls.length <= 5, `used ${f.calls.length} requests`);
+  for (const s of STORES) { assert.equal(r.stores[s].ready, true, s); assert.equal(r.stores[s].status, 'ready', s); }
+  assert.ok(f.calls.length <= 6, `used ${f.calls.length} requests`);
   assert.equal(byId(r, 'jsonrpc_errors').status, 'pass');
   assert.equal(byId(r, 'get_stream').status, 'pass');
   assert.equal(r.tool_count, 2);
@@ -94,6 +94,7 @@ test('missing annotations and titles block Claude and ChatGPT, not Registry', as
   assert.equal(byId(r, 'tool_annotations').status, 'fail');
   assert.equal(byId(r, 'tool_titles').status, 'fail');
   assert.equal(r.stores.claude.ready, false);
+  assert.equal(r.stores.claude.status, 'not_ready');
   assert.ok(r.stores.claude.blockers.includes('tool_annotations'));
   assert.ok(r.stores.chatgpt.blockers.includes('tool_open_world'));
   assert.equal(r.stores.registry.ready, true);
@@ -127,7 +128,16 @@ test('OAuth-gated server: discovery chain, limited score cap', async () => {
   assert.equal(byId(r, 'tools_list').status, 'skip');
   assert.equal(r.limited, true);
   assert.ok(r.score <= LIMITED_CAP);
-  assert.ok(f.calls.length <= 5);
+  assert.ok(f.calls.length <= 6);
+  // tools behind sign-in: no blocker failed, but tool blockers were skipped -> unverified, not ready
+  for (const s of ['claude', 'chatgpt', 'gemini']) {
+    assert.equal(r.stores[s].status, 'unverified', s);
+    assert.equal(r.stores[s].ready, false, s);
+    assert.deepEqual(r.stores[s].blockers, [], s);
+    assert.ok(r.stores[s].unverified.includes('tools_list'), s);
+  }
+  assert.equal(r.stores.registry.status, 'ready');
+  assert.equal(r.stores.registry.ready, true);
 });
 
 test('PRM resource that is only the origin fails for Claude', async () => {
@@ -151,7 +161,7 @@ test('PRM resource that is only the origin fails for Claude', async () => {
   assert.equal(r.stores.claude.ready, false);
   assert.ok(r.stores.claude.blockers.includes('auth_resource'));
   assert.ok(r.stores.gemini.blockers.includes('auth_pkce'));
-  assert.ok(f.calls.length <= 5);
+  assert.ok(f.calls.length <= 6);
 });
 
 test('401 without OAuth discovery fails initialize', async () => {
@@ -220,7 +230,7 @@ test('request budget is respected for stateful servers', async () => {
     return jsonRes({ jsonrpc: '2.0', id: body.id, error: { code: -32601, message: 'nf' } });
   });
   const r = await checkServer(URL0, { fetch: f });
-  assert.ok(f.calls.length <= 5);
+  assert.ok(f.calls.length <= 6);
   assert.equal(f.calls[1].body.method, 'notifications/initialized');
   assert.equal(f.calls[2].headers['mcp-session-id'], 'abc');
   assert.equal(f.calls[2].headers['mcp-protocol-version'], '2025-11-25');
@@ -239,4 +249,30 @@ test('Cloudflare 530 / gateway errors count as unreachable', async () => {
   const r = await checkServer(URL0, { fetch: f });
   assert.equal(r.reachable, false);
   assert.match(r.error, /530/);
+});
+
+test('default budget (6) reaches AS metadata when PRM is found without a 401', async () => {
+  assert.equal(DEFAULT_MAX_REQUESTS, 6);
+  const handler = (method, url, body) => {
+    if (url.endsWith('/.well-known/oauth-protected-resource/mcp')) return jsonRes({ resource: URL0, authorization_servers: ['https://mcp.example.com'] });
+    if (url.endsWith('/.well-known/oauth-authorization-server')) return jsonRes({ issuer: 'https://mcp.example.com', authorization_endpoint: 'https://mcp.example.com/authorize', token_endpoint: 'https://mcp.example.com/token', response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], registration_endpoint: 'https://mcp.example.com/register', grant_types_supported: ['authorization_code', 'refresh_token'] });
+    if (method === 'GET') return new Response('', { status: 405 });
+    if (body.method === 'initialize') return jsonRes({ jsonrpc: '2.0', id: 1, result: initResult() });
+    if (body.method === 'tools/list') return jsonRes({ jsonrpc: '2.0', id: 2, result: { tools: [goodTool('a_b')] } });
+    return jsonRes({ jsonrpc: '2.0', id: body.id, error: { code: -32601, message: 'nf' } });
+  };
+  const f = mockFetch(handler);
+  const r = await checkServer(URL0, { fetch: f });
+  assert.equal(f.calls.length, 6);
+  assert.equal(r.requests, 6);
+  const st = Object.fromEntries(r.checks.map((c) => [c.id, c.status]));
+  assert.equal(st.auth_prm, 'pass');
+  assert.equal(st.auth_as_metadata, 'pass');
+  assert.equal(st.auth_pkce, 'pass');
+  assert.equal(r.auth, 'oauth');
+  assert.ok(!r.checks.some((c) => /request budget/.test(c.detail || '')));
+  // the budget stays a parameter: with 5 the AS metadata probe is skipped
+  const r5 = await checkServer(URL0, { fetch: mockFetch(handler), maxRequests: 5 });
+  assert.equal(r5.requests, 5);
+  assert.equal(r5.checks.find((c) => c.id === 'auth_as_metadata').status, 'skip');
 });

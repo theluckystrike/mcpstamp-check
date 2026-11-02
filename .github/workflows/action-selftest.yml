@@ -1,0 +1,38 @@
+name: Action self-test
+
+# Manual only: runs this repo's action against public MCP servers.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: action-selftest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check McpStamp's own MCP server (gated)
+        id: self
+        uses: ./
+        with:
+          url: https://mcp.zovo.one/stamp/mcp
+          min-score: 90
+          fail-on-store: claude,chatgpt,gemini,registry
+
+      - name: Check a third-party public server (report only)
+        id: other
+        uses: ./
+        with:
+          url: https://mcp.deepwiki.com/mcp
+
+      - name: Show outputs
+        run: |
+          echo "self:  ${{ steps.self.outputs.score }} ${{ steps.self.outputs.grade }} ${{ steps.self.outputs.ready-stores }} ${{ steps.self.outputs.report-url }}"
+          echo "other: ${{ steps.other.outputs.score }} ${{ steps.other.outputs.grade }} ${{ steps.other.outputs.ready-stores }} ${{ steps.other.outputs.report-url }}"

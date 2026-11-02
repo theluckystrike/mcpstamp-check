@@ -2,6 +2,7 @@
 import { checkServer, CHECKS, STORES, STORE_TITLES, ENGINE_VERSION, LIMITED_CAP, DEFAULT_UA } from './check.mjs';
 import { checkUrlSafety, normalizeUrl, resultId, sha256Hex, isPrivateIp } from './ssrf.mjs';
 import { badgeSvg } from './badge.mjs';
+import { handleMcp, MCP_INFO } from './mcp.mjs';
 
 const FRESH_MS = 10 * 60 * 1000;
 const RESULT_TTL_S = 30 * 24 * 3600;
@@ -125,24 +126,32 @@ async function readResult(env, id) {
   try { return await env.RESULTS.get(`r:${id}`, 'json'); } catch { return null; }
 }
 
-async function handleCheck(req, env, ctx, params) {
-  const raw = params.get('url');
-  if (!raw) return json({ error: 'bad_url', detail: 'missing url parameter' }, 400);
+/**
+ * Shared check path for GET /api/check and the MCP tool check_mcp_server:
+ * URL safety, 10-minute cache, rate limit, live check, KV store.
+ * Returns {http, body, headers}.
+ */
+export async function checkTarget(req, env, ctx, raw, fresh) {
+  if (!raw) return { http: 400, body: { error: 'bad_url', detail: 'missing url parameter' } };
   const safe = checkUrlSafety(raw);
-  if (!safe.ok) return json({ error: safe.error, detail: safe.reason }, 400);
+  if (!safe.ok) return { http: 400, body: { error: safe.error, detail: safe.reason } };
   const normalized = normalizeUrl(safe.url);
   const id = await resultId(normalized);
-  const fresh = params.get('fresh') === '1';
   const prev = await readResult(env, id);
   const age = prev ? Date.now() - Date.parse(prev.checked_at) : Infinity;
-  if (prev && !fresh && age < FRESH_MS) return json({ ...prev, cached: true });
+  if (prev && !fresh && age < FRESH_MS) return { http: 200, body: { ...prev, cached: true } };
   const tok = await takeToken(req, env);
   if (!tok.ok) {
-    if (prev && !fresh) return json({ ...prev, cached: true, stale: true, rate_limited: true });
-    return json({ error: 'rate_limited', retry_after: tok.retry_after }, 429, { 'retry-after': String(tok.retry_after) });
+    if (prev && !fresh) return { http: 200, body: { ...prev, cached: true, stale: true, rate_limited: true } };
+    return { http: 429, body: { error: 'rate_limited', retry_after: tok.retry_after }, headers: { 'retry-after': String(tok.retry_after) } };
   }
   const out = await runCheck(normalized, id, env, ctx, !!prev);
-  return json(out.body, out.http, { 'x-ratelimit-remaining': String(tok.remaining) });
+  return { ...out, headers: { 'x-ratelimit-remaining': String(tok.remaining) } };
+}
+
+async function handleCheck(req, env, ctx, params) {
+  const out = await checkTarget(req, env, ctx, params.get('url'), params.get('fresh') === '1');
+  return json(out.body, out.http, out.headers || {});
 }
 
 async function handleBadgeByUrl(req, env, ctx, params) {
@@ -169,7 +178,9 @@ function index() {
       checks: 'GET /stamp/api/checks',
       badge_by_url: 'GET /stamp/badge?url=<url>',
       badge_by_id: 'GET /stamp/badge/<id>.svg',
+      mcp: 'POST /stamp/mcp (MCP Streamable HTTP, authless)',
     },
+    mcp: MCP_INFO,
     limits: { checks_per_hour_per_ip: LIMIT_PER_HOUR, result_cache_minutes: FRESH_MS / 60000 },
   };
 }
@@ -177,6 +188,13 @@ function index() {
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    if (/^(?:\/stamp)?\/mcp\/?$/.test(url.pathname)) {
+      try {
+        return await handleMcp(req, { checkTarget: (raw, fresh) => checkTarget(req, env, ctx, raw, fresh) });
+      } catch (e) {
+        return json({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Internal error' } }, 500);
+      }
+    }
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     if (req.method !== 'GET') return json({ error: 'method_not_allowed' }, 405, { allow: 'GET, OPTIONS' });
     let path = url.pathname.replace(/^\/stamp(?=\/|$)/, '') || '/';

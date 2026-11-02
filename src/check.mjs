@@ -1,13 +1,15 @@
 // McpStamp Check engine. Pure ESM: no Worker-only or Node-only APIs.
 // Usage: const result = await checkServer(url, { fetch, timeoutMs, userAgent });
 // The caller provides fetch. The engine never sends more than `maxRequests` logical
-// HTTP requests per run (default 5; redirect hops are bounded separately, max 3).
+// HTTP requests per run (default 6; redirect hops are bounded separately, max 3).
 
 import { checkUrlSafety, normalizeUrl, redactUrl } from './ssrf.mjs';
 
-export const ENGINE_VERSION = '1.0.0';
+export const ENGINE_VERSION = '1.1.0';
 export const LATEST_PROTOCOL = '2025-11-25';
 export const KNOWN_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+/** Default cap on logical HTTP requests per check (6: room for PRM + AS metadata on servers that gate only tool calls). */
+export const DEFAULT_MAX_REQUESTS = 6;
 export const DEFAULT_UA = 'McpStampCheck/1.0 (+https://www.mcpstamp.com/check/)';
 export const STORES = ['claude', 'chatgpt', 'gemini', 'registry'];
 export const STORE_TITLES = {
@@ -267,7 +269,7 @@ export async function checkServer(url, opts = {}) {
     fetch,
     timeoutMs = 8000,
     userAgent = DEFAULT_UA,
-    maxRequests = 5,
+    maxRequests = DEFAULT_MAX_REQUESTS,
     maxBodyBytes = 1024 * 1024,
     headers = {},
     validateUrl = checkUrlSafety,
@@ -693,9 +695,11 @@ function buildResult(s, ctx, { normalized, started, reachable, error }) {
     const mine = checks.filter((c) => CHECK_BY_ID[c.id].stores.includes(st));
     const blockers = mine.filter((c) => c.status === 'fail' && CHECK_BY_ID[c.id].blocks.includes(st)).map((c) => c.id);
     const unverified = mine.filter((c) => c.status === 'skip' && CHECK_BY_ID[c.id].blocks.includes(st) && !/No authorization detected|No tools to inspect|No authorization server metadata|No protected resource metadata|OAuth found via/.test(c.detail || '')).map((c) => c.id);
-    const ok = reachable !== false && blockers.length === 0;
+    // not_ready: a blocking check failed (or unreachable). unverified: none failed, but a blocking
+    // check for this store was skipped (e.g. tools behind sign-in, request budget). ready: neither.
+    const status = reachable === false || blockers.length ? 'not_ready' : unverified.length ? 'unverified' : 'ready';
     const stScore = reachable === false ? 0 : limited ? Math.min(scoreOf(mine), LIMITED_CAP) : scoreOf(mine);
-    stores[st] = { ready: ok, score: stScore, blockers: reachable === false ? ['initialize'] : blockers, unverified };
+    stores[st] = { status, ready: status === 'ready', score: stScore, blockers: reachable === false ? ['initialize'] : blockers, unverified };
   }
   const ir = s.initResult || {};
   const si = ir.serverInfo || {};
