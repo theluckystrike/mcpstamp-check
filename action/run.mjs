@@ -19,6 +19,12 @@ export function parseStores(input) {
 
 const esc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 
+const REASON_TEXT = { needs_sign_in: 'needs sign-in', not_probed: 'not probed', not_reached: 'handshake did not complete', blocked: 'blocked' };
+export function unverifiedList(st) {
+  const why = (st && st.unverified_reasons) || {};
+  return ((st && st.unverified) || []).map((id) => (REASON_TEXT[why[id]] ? `${id} (${REASON_TEXT[why[id]]})` : id)).join(', ');
+}
+
 function storeStatus(st) {
   if (!st) return 'not_ready';
   return st.status || (st.ready ? 'ready' : 'not_ready');
@@ -33,7 +39,7 @@ export function summaryMarkdown(r, gate) {
     const st = (r.stores || {})[id] || {};
     const s = storeStatus(st);
     const label = s === 'ready' ? 'ready' : s === 'unverified' ? 'unverified' : 'not ready';
-    const extra = s === 'unverified' && st.unverified && st.unverified.length ? `could not verify: ${st.unverified.join(', ')}` : (st.blockers || []).join(', ');
+    const extra = s === 'unverified' && st.unverified && st.unverified.length ? `could not verify: ${unverifiedList(st)}` : (st.blockers || []).join(', ');
     lines.push(`| ${name} | ${label} | ${st.score ?? '-'} | ${esc(extra) || '-'} |`);
   }
   const issues = (r.checks || []).filter((c) => c.status === 'fail' || c.status === 'warn')
@@ -64,7 +70,7 @@ export function evaluateGate(r, minScore, stores) {
     const st = (r.stores || {})[s];
     if (!st || !st.ready) {
       const status = storeStatus(st);
-      const why = status === 'unverified' ? `unverified (${(st.unverified || []).join(', ')})` : `blocked by ${((st && st.blockers) || []).join(', ') || 'unknown'}`;
+      const why = status === 'unverified' ? `unverified (${unverifiedList(st)})` : `blocked by ${((st && st.blockers) || []).join(', ') || 'unknown'}`;
       failures.push(`${STORE_NAMES[s]} is not ready: ${why}.`);
     }
   }

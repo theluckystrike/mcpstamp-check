@@ -92,8 +92,8 @@ Base URL: `https://mcp.zovo.one/stamp` (also proxied at `https://www.mcpstamp.co
 | `GET /badge?url=<url>` or `GET /badge/<id>.svg` | SVG badge |
 | `POST /mcp` | MCP Streamable HTTP endpoint (see above) |
 
-Errors: `400 {error:"bad_url"|"blocked_host"}`, `429 {error:"rate_limited", retry_after}`, `502 {error:"unreachable", detail}`.
-Limits: 20 live checks per hour per IP; at most 6 HTTP requests to the checked server per check; 8 s timeout and 1 MB body cap per request; https only, ports 443/8443, no IP literals or private names, max 3 redirects (each re-validated).
+Errors: `400 {error:"bad_url"|"blocked_host"}`, `429 {error:"rate_limited", retry_after}`, `502 {error:"unreachable"|"blocked_by_firewall", detail}` (`blocked_by_firewall`: the server's WAF or bot protection answered with a 403 HTML page or a Cloudflare challenge, so nothing was scored).
+Limits: 20 live checks per hour per IP; at most 10 HTTP requests to the checked server per check and 25 s wall time per check; 8 s timeout and 1 MB body cap per request; https only, ports 443/8443, no IP literals or private names; every URL fetched (first URL, each of max 3 redirect hops, each discovery URL) is re-validated and its DNS answers (DNS-over-HTTPS) must be public. Results are kept 30 days; a badge request for a result older than 7 days triggers one background re-check. Credentials in the URL (the segment after `/t/`, random-looking path segments of 24+ characters, secret query values) are shown and stored as `REDACTED`.
 
 ## Proxies
 
@@ -101,7 +101,7 @@ A trusted proxy (the mcpstamp.com Pages Functions) may send `x-mcpstamp-proxy-ke
 
 ## Scoring
 
-Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Score = weighted pass ratio over the checks that apply. Grades: A >= 90, B >= 80, C >= 65, D >= 50, else F. Each store gets `status`: `ready` (no blocking check failed and none was skipped), `unverified` (none failed, but a blocking check could not run, for example tools behind sign-in) or `not_ready` (a blocking check failed). `ready` is true only for `ready`. When the tools sit behind sign-in and cannot be inspected, the score is capped at 85.
+Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Score = weighted pass ratio over the checks that apply. Grades: A >= 90, B >= 80, C >= 65, D >= 50, else F. Each store gets `status`: `ready` (no blocking check failed and none was skipped), `unverified` (none failed, but a blocking check could not run, for example tools behind sign-in) or `not_ready` (a blocking check failed). `ready` is true only for `ready`. When the tools sit behind sign-in and cannot be inspected, the score is capped at 85. Skipped checks carry `skip_reason`: `not_applicable`, `needs_sign_in`, `not_probed` (request or time budget), `not_reached` (handshake did not complete) or `blocked`; each store lists `unverified_reasons`. A check may carry `store_status` when one store treats it more softly (for example legacy SSE is a warning for Claude and the Registry). The `registry` store means "a valid remote for the MCP Registry" (public https, answers as Streamable HTTP or SSE), not that the server is published there.
 
 | Check | Group | What it tests | Weight | Counts for | Blocks |
 |---|---|---|---|---|---|
@@ -115,17 +115,20 @@ Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Scor
 | `server_info` | metadata | serverInfo name and version | 6 | claude, chatgpt, gemini, registry | - |
 | `instructions` | metadata | Server instructions | 4 | claude, chatgpt, gemini | - |
 | `capabilities_tools` | metadata | tools capability declared | 3 | claude, chatgpt, gemini, registry | - |
+| `auth_method` | auth | Sign-in method the store supports (OAuth or none) | 6 | claude, chatgpt, gemini | chatgpt, gemini |
 | `auth_challenge` | auth | 401 carries WWW-Authenticate resource_metadata | 6 | claude, chatgpt, gemini | - |
 | `auth_prm` | auth | Protected resource metadata (RFC 9728) | 8 | claude, chatgpt, gemini | claude, chatgpt |
 | `auth_resource` | auth | Resource metadata "resource" equals the server URL | 4 | claude, chatgpt, gemini | claude |
 | `auth_as_metadata` | auth | Authorization server metadata (RFC 8414 / OIDC) | 8 | claude, chatgpt, gemini | claude, chatgpt, gemini |
+| `auth_gemini_discovery` | auth | First metadata URL Gemini tries answers 200 with the required fields | 4 | gemini | gemini |
+| `auth_chatgpt_metadata` | auth | issuer equals the authorization_servers entry; token_endpoint_auth_methods_supported (ChatGPT) | 4 | chatgpt | chatgpt |
 | `auth_pkce` | auth | PKCE S256 advertised | 6 | claude, chatgpt, gemini | claude, chatgpt, gemini |
 | `auth_registration` | auth | Client registration (DCR or Client ID Metadata Documents) | 6 | claude, chatgpt, gemini | - |
 | `auth_refresh` | auth | refresh_token grant advertised | 3 | claude, chatgpt, gemini | - |
 | `tools_list` | tools | tools/list returns tools | 10 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini |
 | `tool_schema` | tools | inputSchema is an object schema | 6 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini |
 | `tool_names` | tools | Tool names are valid and portable | 5 | claude, chatgpt, gemini, registry | - |
-| `tool_annotations` | tools | readOnlyHint and destructiveHint on every tool | 10 | claude, chatgpt, gemini | claude, chatgpt |
+| `tool_annotations` | tools | readOnlyHint or destructiveHint on every tool | 10 | claude, chatgpt, gemini | claude, chatgpt |
 | `tool_open_world` | tools | Explicit readOnlyHint, destructiveHint and openWorldHint (ChatGPT) | 5 | chatgpt | chatgpt |
 | `tool_titles` | tools | Human-readable title on every tool | 5 | claude, chatgpt, gemini | claude, chatgpt |
 | `tool_descriptions` | tools | Tool descriptions | 6 | claude, chatgpt, gemini | - |
@@ -140,6 +143,13 @@ Every rule is traced to the store or spec text in [SOURCES.md](SOURCES.md).
 import { checkServer, CHECKS } from './src/check.mjs';
 const result = await checkServer('https://example.com/mcp', { fetch, timeoutMs: 8000 });
 console.log(result.score, result.grade, result.stores.claude);
+```
+
+Every fetched URL passes a host guard (syntax plus DNS). By default DNS goes through DNS-over-HTTPS (1.1.1.1) and the check refuses when DNS cannot be read. In Node, pass the system resolver so LAN and `/etc/hosts` names are judged by the same answers `fetch` will use:
+
+```js
+import { nodeResolve } from './src/resolve-node.mjs';
+await checkServer(url, { fetch, resolve: nodeResolve });
 ```
 
 CLI: `node scripts/check-cli.mjs https://example.com/mcp [--json]`

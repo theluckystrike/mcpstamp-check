@@ -194,7 +194,7 @@ test('self-check: the engine grades this MCP endpoint A and ready for all 4 stor
     if (u.pathname.startsWith('/stamp')) return worker.fetch(new Request(url, init), e, ctx);
     return Promise.resolve(new Response(JSON.stringify({ error: 'not_found' }), { status: 404, headers: { 'content-type': 'application/json' } }));
   };
-  const r = await checkServer(MCP, { fetch: f });
+  const r = await checkServer(MCP, { fetch: f, resolve: async () => ['104.21.3.4'] });
   const bad = r.checks.filter((c) => c.status === 'fail' || c.status === 'warn').map((c) => `${c.id}: ${c.detail}`);
   assert.deepEqual(bad, []);
   assert.equal(r.grade, 'A');
@@ -215,7 +215,7 @@ test('check_mcp_server shows unverified stores (tools behind sign-in) as not rea
   const r = await rpc({ jsonrpc: '2.0', id: 20, method: 'tools/call', params: { name: 'check_mcp_server', arguments: { url } } }, { e });
   const text = r.json.result.content[0].text;
   assert.match(text, /Claude Directory: unverified \(score 85\), could not verify tools_list, tool_schema/);
-  assert.match(text, /MCP Registry: ready/);
+  assert.match(text, /MCP Registry \(valid remote\): ready/);
   assert.equal(r.json.result.structuredContent.stores.claude.status, 'unverified');
   assert.equal(r.json.result.structuredContent.stores.claude.ready, false);
 });

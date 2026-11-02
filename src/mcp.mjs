@@ -1,11 +1,11 @@
 // Remote MCP server (Streamable HTTP, stateless, authless) at /stamp/mcp.
 // Tools call the same check code and rate limit as GET /stamp/api/check.
-import { STORES, STORE_TITLES, ENGINE_VERSION } from './check.mjs';
+import { STORES, STORE_TITLES, STORE_MEANING, ENGINE_VERSION } from './check.mjs';
 import { explainCheck, CHECK_IDS, SOURCES_URL } from './explain.mjs';
 
 export const MCP_PROTOCOL = '2025-11-25';
 export const MCP_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-export const SERVER_VERSION = '1.1.0';
+export const SERVER_VERSION = '1.2.0';
 export const AUDIT_LINE = 'Need it fixed? Readiness Audit $490: https://www.mcpstamp.com/services/';
 const MAX_BODY = 64 * 1024;
 
@@ -110,6 +110,20 @@ function textResult(text, structured, isError = false) {
   return r;
 }
 
+const REASON_TEXT = { needs_sign_in: 'needs sign-in', not_probed: 'not probed, request or time budget', not_reached: 'handshake did not complete', blocked: 'blocked' };
+
+/** "tools_list, tool_schema (needs sign-in); auth_as_metadata (not probed, request or time budget)" */
+export function unverifiedText(st) {
+  const reasons = st.unverified_reasons || {};
+  const groups = new Map();
+  for (const id of st.unverified || []) {
+    const k = REASON_TEXT[reasons[id]] || '';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(id);
+  }
+  return [...groups].map(([k, ids]) => (k ? `${ids.join(', ')} (${k})` : ids.join(', '))).join('; ');
+}
+
 export function badgeMarkdown(r) {
   return `[![McpStamp](${r.badge_url})](${r.report_url})`;
 }
@@ -124,7 +138,7 @@ export function formatCheck(r) {
   for (const s of STORES) {
     const st = (r.stores || {})[s] || {};
     const status = st.status || (st.ready ? 'ready' : 'not_ready');
-    stores[s] = { name: STORE_TITLES[s], status, ready: status === 'ready', score: st.score ?? 0, blockers: st.blockers || [], unverified: st.unverified || [] };
+    stores[s] = { name: STORE_TITLES[s], meaning: STORE_MEANING[s], status, ready: status === 'ready', score: st.score ?? 0, blockers: st.blockers || [], unverified: st.unverified || [], unverified_reasons: st.unverified_reasons || {} };
   }
   const md = badgeMarkdown(r);
   const lines = [];
@@ -134,14 +148,15 @@ export function formatCheck(r) {
   if (typeof r.tool_count === 'number') meta.push(`${r.tool_count} tools`);
   meta.push(`checked ${r.checked_at}${r.cached ? ' (cached)' : ''}`);
   lines.push(`Score ${r.score}/100, grade ${r.grade}. ${meta.join(', ')}.`);
-  if (r.limited) lines.push(`Tools sit behind sign-in and could not be inspected, so the score is capped at 85.`);
+  if (r.limited) lines.push(`Parts of the server sit behind sign-in and could not be inspected, so the score is capped at 85.`);
+  if (r.budget_hit) lines.push(`Some checks were not probed: the check stopped at its ${r.budget_hit}.`);
   lines.push('', 'Store readiness:');
   for (const s of STORES) {
     const st = stores[s];
     const label = st.status === 'ready' ? 'ready' : st.status === 'unverified' ? 'unverified' : 'NOT ready';
     let tail = st.blockers.length ? `, blocked by ${st.blockers.join(', ')}` : '';
-    if (st.status === 'unverified') tail = `, could not verify ${st.unverified.join(', ')}`;
-    lines.push(`- ${st.name}: ${label} (score ${st.score})${tail}`);
+    if (st.status === 'unverified') tail = `, could not verify ${unverifiedText(st)}`;
+    lines.push(`- ${st.name}${s === 'registry' ? ' (valid remote)' : ''}: ${label} (score ${st.score})${tail}`);
   }
   lines.push('');
   if (issues.length) {
@@ -206,6 +221,7 @@ async function callTool(name, args, deps) {
   if (b.error === 'rate_limited') return textResult(`Rate limited: 20 live checks per hour per client. Try again in ${b.retry_after} seconds, or check the same URL without fresh to get a cached result.`, null, true);
   if (b.error === 'bad_url') return textResult(`Not a checkable URL (${b.detail || 'bad_url'}). Pass a public https URL of an MCP endpoint, for example https://example.com/mcp.`, null, true);
   if (b.error === 'blocked_host') return textResult(`This host cannot be checked: ${b.detail || 'private or reserved address'}. Only public https hosts are allowed.`, null, true);
+  if (b.error === 'blocked_by_firewall') return textResult(`Could not check: ${b.detail || 'a firewall or bot protection blocked the request'}`, null, true);
   if (b.error === 'unreachable') return textResult(`The server did not answer: ${b.detail || 'no response'}. Make sure it is public, served over https, and answers POST initialize within 8 seconds.\n\n${AUDIT_LINE}`, null, true);
   return textResult(`Check failed: ${b.error || 'HTTP ' + out.http}${b.detail ? ' (' + b.detail + ')' : ''}.`, null, true);
 }

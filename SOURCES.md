@@ -1,5 +1,7 @@
 # McpStamp Check: externally verifiable requirements by store
 
+Engine 1.2.0 (2026-11-02) adds `auth_method`, `auth_gemini_discovery` and `auth_chatgpt_metadata`, relaxes `tool_annotations` (Claude wording), and makes legacy SSE and missing PRM per-store (rows below). OpenAI O2 wording re-read 2026-11-02 at developers.openai.com/apps-sdk/build/auth.md; Claude C1-C5 re-read the same day.
+
 Collected 2026-11-02. Scope: only checks a scorer can run from outside over HTTP/DNS, without logging in.
 Legend: **MUST** = blocker or stated as mandatory. **SHOULD** = recommended. **INFO** = client behavior useful for a check. "unverified" = not confirmed in a primary source.
 Gemini sources are local files in saved copies of developers.google.com/connected-apps pages (canonical URL under developers.google.com/connected-apps/...).
@@ -9,7 +11,7 @@ Gemini sources are local files in saved copies of developers.google.com/connecte
 | check | rule encoded | blocks | sources |
 |---|---|---|---|
 | `https` | URL is https:// | all | C1, Registry R1, Gemini G1 |
-| `initialize` | POST initialize returns JSON-RPC result (JSON or SSE); 401 counts only with OAuth discovery | all | S2, S3, G2 (Streamable HTTP only), C5 |
+| `initialize` | POST initialize returns JSON-RPC result (JSON or SSE); 401 passes with OAuth discovery, is "not verified" without it; legacy HTTP+SSE fails for chatgpt/gemini, warns for claude/registry | all | S2, S3, G2 (Streamable HTTP only), O4 ("Support the MCP streamable HTTP transport"), C4 (legacy SSE supported, deprecated), R4 (`sse` remote type), C5 |
 | `protocol_version` | 2025-11-25/2025-06-18 pass, 2025-03-26 warn, 2024-11-05 or newer-than-requested fail | gemini | G2 (2025-03-26 to 2025-11-25), S3 |
 | `content_type` | application/json or text/event-stream | - | S2 |
 | `jsonrpc_errors` | unknown method -> -32601 | - | JSON-RPC 2.0, S3 |
@@ -18,17 +20,20 @@ Gemini sources are local files in saved copies of developers.google.com/connecte
 | `server_info` | serverInfo.name + version | - | S3 |
 | `instructions` | instructions >= 40 chars | - | G1, G2, O4 |
 | `capabilities_tools` | capabilities.tools present | - | S4 |
+| `auth_method` | a 401/403 server offers MCP OAuth discovery (API-key/static token gate fails) | chatgpt, gemini (claude: warn, static headers beta) | O2 ("nor can it present custom API keys"), O3 ("the portal doesn't provide an API-key connection flow"), G3 (OAuth 2.1 auth code + PKCE), C3 (`static_headers` beta) |
 | `auth_challenge` | 401 has WWW-Authenticate Bearer resource_metadata | - | C3, O2, S1 |
-| `auth_prm` | RFC 9728 doc with authorization_servers | claude, chatgpt | C3, O2, S1 |
+| `auth_prm` | RFC 9728 doc with authorization_servers | chatgpt; claude (warn only when AS metadata on the origin works, 2025-03-26 auth) | C3, C4 ("Claude follows the 2025-03-26, 2025-06-18, and 2025-11-25 authorization specifications"), C5, O2, S1 |
 | `auth_resource` | PRM resource equals the server URL exactly | claude | C3 ("must equal the URL as the user enters it in Claude, including any path component") |
 | `auth_as_metadata` | RFC 8414/OIDC doc with authorization_endpoint, token_endpoint, response_types_supported ["code"] | claude, chatgpt, gemini | gdocs connected-apps_mcp_oauth, S1, O2 |
+| `auth_gemini_discovery` | the first Gemini metadata URL that answers (`<issuer>/.well-known/oauth-authorization-server`, then `.../openid-configuration`, suffix appended to path issuers) returns 200 with authorization_endpoint, token_endpoint, response_types_supported ["code"] | gemini | G3 ("uses the first URL that returns a response—including an error") |
+| `auth_chatgpt_metadata` | AS metadata `issuer` equals the PRM `authorization_servers` entry exactly; `token_endpoint_auth_methods_supported` present | chatgpt | O2 ("Fields that must be correct: issuer ... Use this exact value in the protected resource metadata authorization_servers list"; token_endpoint_auth_methods_supported) |
 | `auth_pkce` | code_challenge_methods_supported includes S256 | claude, chatgpt, gemini | S1, O2, gdocs oauth |
 | `auth_registration` | registration_endpoint or client_id_metadata_document_supported | - (warn) | C3, O2, gdocs oauth (manual client id allowed) |
 | `auth_refresh` | grant_types_supported includes refresh_token | - | gdocs oauth (persistent linking), C3 |
 | `tools_list` | tools/list returns >= 1 tool | claude, chatgpt, gemini | S4 |
 | `tool_schema` | inputSchema (and outputSchema if present) type object | claude, chatgpt, gemini | S4 |
 | `tool_names` | unique, spec charset/length; warn if not ^[A-Za-z_][A-Za-z0-9_-]{0,63}$ | - | S4, C2 (64 chars) |
-| `tool_annotations` | readOnlyHint on every tool, destructiveHint where readOnlyHint is false | claude, chatgpt | C1, C2, O1 |
+| `tool_annotations` | every tool sets readOnlyHint or destructiveHint | claude, chatgpt | C1 ("a `readOnlyHint` or `destructiveHint` annotation"), C2, O1 |
 | `tool_open_world` | all three hints explicit booleans | chatgpt | O1 |
 | `tool_titles` | title or annotations.title on every tool | claude, chatgpt | C1, C2, O4 |
 | `tool_descriptions` | every description >= 20 chars (fail), 60-2000 (pass) | - | C2, G2 (heuristic thresholds) |

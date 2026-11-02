@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkServer, CHECKS, gradeFor, parseWwwAuthenticate, STORES, LIMITED_CAP, DEFAULT_MAX_REQUESTS } from '../src/check.mjs';
+import { checkServer as rawCheck, CHECKS, gradeFor, parseWwwAuthenticate, STORES, LIMITED_CAP, DEFAULT_MAX_REQUESTS } from '../src/check.mjs';
+
+// Tests never touch the network: DNS answers come from this stub (a public address by default).
+export const PUBLIC_IP = '93.184.215.14';
+const checkServer = (u, o = {}) => rawCheck(u, { resolve: async () => [PUBLIC_IP], ...o });
 
 const URL0 = 'https://mcp.example.com/mcp';
 const goodTool = (name, extra = {}) => ({
@@ -118,13 +122,13 @@ test('OAuth-gated server: discovery chain, limited score cap', async () => {
     if (url === 'https://auth.example.com/.well-known/oauth-authorization-server') return jsonRes({
       issuer: 'https://auth.example.com', authorization_endpoint: 'https://auth.example.com/a', token_endpoint: 'https://auth.example.com/t',
       registration_endpoint: 'https://auth.example.com/r', response_types_supported: ['code'], code_challenge_methods_supported: ['S256'],
-      grant_types_supported: ['authorization_code', 'refresh_token'],
+      grant_types_supported: ['authorization_code', 'refresh_token'], token_endpoint_auth_methods_supported: ['none'],
     });
     return jsonRes({}, 404);
   });
   const r = await checkServer(URL0, { fetch: f });
   assert.equal(r.auth, 'oauth');
-  for (const id of ['initialize', 'auth_challenge', 'auth_prm', 'auth_resource', 'auth_as_metadata', 'auth_pkce', 'auth_registration', 'auth_refresh']) assert.equal(byId(r, id).status, 'pass', id);
+  for (const id of ['initialize', 'auth_method', 'auth_challenge', 'auth_prm', 'auth_resource', 'auth_as_metadata', 'auth_gemini_discovery', 'auth_chatgpt_metadata', 'auth_pkce', 'auth_registration', 'auth_refresh']) assert.equal(byId(r, id).status, 'pass', id);
   assert.equal(byId(r, 'tools_list').status, 'skip');
   assert.equal(r.limited, true);
   assert.ok(r.score <= LIMITED_CAP);
@@ -135,6 +139,7 @@ test('OAuth-gated server: discovery chain, limited score cap', async () => {
     assert.equal(r.stores[s].ready, false, s);
     assert.deepEqual(r.stores[s].blockers, [], s);
     assert.ok(r.stores[s].unverified.includes('tools_list'), s);
+    assert.equal(r.stores[s].unverified_reasons.tools_list, 'needs_sign_in', s);
   }
   assert.equal(r.stores.registry.status, 'ready');
   assert.equal(r.stores.registry.ready, true);
@@ -164,12 +169,19 @@ test('PRM resource that is only the origin fails for Claude', async () => {
   assert.ok(f.calls.length <= 6);
 });
 
-test('401 without OAuth discovery fails initialize', async () => {
+test('401 without OAuth discovery: transport not verified, API-key gate blocks ChatGPT and Gemini only', async () => {
   const f = mockFetch(() => jsonRes({ error: 'need api key' }, 401));
   const r = await checkServer(URL0, { fetch: f });
   assert.equal(r.auth, 'other');
-  assert.equal(byId(r, 'initialize').status, 'fail');
+  assert.equal(byId(r, 'initialize').status, 'skip');
+  assert.equal(byId(r, 'initialize').skip_reason, 'needs_sign_in');
+  assert.equal(byId(r, 'auth_method').status, 'fail');
   assert.equal(r.stores.claude.ready, false);
+  assert.equal(r.stores.claude.status, 'unverified');
+  assert.deepEqual(r.stores.claude.blockers, []);
+  for (const s of ['chatgpt', 'gemini']) { assert.equal(r.stores[s].status, 'not_ready', s); assert.ok(r.stores[s].blockers.includes('auth_method'), s); }
+  assert.equal(r.stores.registry.status, 'unverified');
+  assert.doesNotMatch(byId(r, 'auth_method').fix, /cannot send API keys\.$/);
 });
 
 test('unreachable server: score 0, reachable false', async () => {
@@ -194,7 +206,9 @@ test('redirect to a private host is refused', async () => {
   const f = mockFetch(() => new Response('', { status: 307, headers: { location: 'https://127.0.0.1/mcp' } }));
   const r = await checkServer(URL0, { fetch: f });
   assert.equal(f.calls.length, 1);
-  assert.equal(byId(r, 'initialize').status, 'fail');
+  assert.equal(r.reachable, false);
+  assert.equal(r.error_code, 'blocked_host');
+  assert.match(r.error, /blocked redirect target/);
 });
 
 test('redirects are followed (max 3) and re-validated', async () => {
@@ -251,8 +265,8 @@ test('Cloudflare 530 / gateway errors count as unreachable', async () => {
   assert.match(r.error, /530/);
 });
 
-test('default budget (6) reaches AS metadata when PRM is found without a 401', async () => {
-  assert.equal(DEFAULT_MAX_REQUESTS, 6);
+test('default budget (10) reaches AS metadata when PRM is found without a 401', async () => {
+  assert.equal(DEFAULT_MAX_REQUESTS, 10);
   const handler = (method, url, body) => {
     if (url.endsWith('/.well-known/oauth-protected-resource/mcp')) return jsonRes({ resource: URL0, authorization_servers: ['https://mcp.example.com'] });
     if (url.endsWith('/.well-known/oauth-authorization-server')) return jsonRes({ issuer: 'https://mcp.example.com', authorization_endpoint: 'https://mcp.example.com/authorize', token_endpoint: 'https://mcp.example.com/token', response_types_supported: ['code'], code_challenge_methods_supported: ['S256'], registration_endpoint: 'https://mcp.example.com/register', grant_types_supported: ['authorization_code', 'refresh_token'] });
@@ -263,7 +277,7 @@ test('default budget (6) reaches AS metadata when PRM is found without a 401', a
   };
   const f = mockFetch(handler);
   const r = await checkServer(URL0, { fetch: f });
-  assert.equal(f.calls.length, 6);
+  assert.equal(f.calls.length, 6); // root issuer: the Gemini URL is the RFC 8414 URL, fetched once
   assert.equal(r.requests, 6);
   const st = Object.fromEntries(r.checks.map((c) => [c.id, c.status]));
   assert.equal(st.auth_prm, 'pass');

@@ -2,6 +2,7 @@
 // Usage: node scripts/self-scan.mjs [out.json]   (concurrency 4)
 import { writeFileSync } from 'node:fs';
 import { checkServer } from '../src/check.mjs';
+import { nodeResolve } from '../src/resolve-node.mjs';
 import { resultId } from '../src/ssrf.mjs';
 
 const out = process.argv[2] || 'self-scan.json';
@@ -12,7 +13,7 @@ let i = 0;
 async function worker() {
   while (i < urls.length) {
     const url = urls[i++];
-    const r = await checkServer(url, { fetch: globalThis.fetch });
+    const r = await checkServer(url, { fetch: globalThis.fetch, resolve: nodeResolve });
     results.push({ id: await resultId(url), ...r });
   }
 }

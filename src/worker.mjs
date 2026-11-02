@@ -1,10 +1,13 @@
 // mcpstamp-check Worker: HTTP API, KV result store, rate limit, badges.
-import { checkServer, CHECKS, STORES, STORE_TITLES, ENGINE_VERSION, LIMITED_CAP, DEFAULT_UA } from './check.mjs';
-import { checkUrlSafety, normalizeUrl, resultId, sha256Hex, isPrivateIp } from './ssrf.mjs';
+import { checkServer, CHECKS, STORES, STORE_TITLES, STORE_MEANING, SKIP_REASONS, ENGINE_VERSION, LIMITED_CAP, DEFAULT_UA, DEFAULT_DEADLINE_MS } from './check.mjs';
+import { checkUrlSafety, normalizeUrl, resultId, sha256Hex, makeHostGuard, scrubSecrets, secretParts } from './ssrf.mjs';
 import { badgeSvg } from './badge.mjs';
 import { handleMcp, MCP_INFO } from './mcp.mjs';
 
 const FRESH_MS = 10 * 60 * 1000;
+/** Badges older than this trigger one background re-check (when the rate budget allows). */
+export const STALE_MS = 7 * 24 * 3600 * 1000;
+const REFRESH_RETRY_MS = 3600 * 1000;
 const RESULT_TTL_S = 30 * 24 * 3600;
 const LIMIT_PER_HOUR = 20;
 const BADGE_MAX_AGE = 21600;
@@ -81,39 +84,26 @@ async function takeToken(req, env) {
   return { ok: true, remaining: LIMIT_PER_HOUR - count };
 }
 
-// ---------- DNS guard (DoH): refuse names that resolve to private addresses ----------
-async function dnsGuard(host) {
-  const ips = [];
-  let anyAnswer = false;
-  let answered = 0;
-  for (const type of ['A', 'AAAA']) {
-    try {
-      const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(host)}&type=${type}`, {
-        headers: { accept: 'application/dns-json' },
-      });
-      if (!r.ok) continue;
-      const j = await r.json();
-      if (j.Status === 0 || j.Status === 3) answered++;
-      for (const a of j.Answer || []) {
-        if (a.type === 1 || a.type === 28) { ips.push(a.data); anyAnswer = true; }
-      }
-    } catch { /* DoH failure: rely on Cloudflare's own egress guard */ }
-  }
-  if (ips.some((ip) => isPrivateIp(ip))) return { ok: false, error: 'blocked_host', detail: 'host resolves to a private or reserved address' };
-  if (answered === 2 && !anyAnswer) return { ok: false, error: 'unreachable', detail: 'DNS name has no A or AAAA record' };
-  return { ok: true };
-}
-
+// ---------- live check ----------
+// Every URL the engine fetches (first URL, each redirect hop, each discovery URL) passes the host
+// guard: syntax rules plus DNS-over-HTTPS (1.1.1.1), refusing names that resolve to private or
+// reserved addresses. If DoH itself fails, global_fetch_strictly_public still keeps egress public.
 async function runCheck(normalized, id, env, ctx, hadPrevious) {
-  const dns = await dnsGuard(new URL(normalized).hostname);
-  if (!dns.ok) return { http: dns.error === 'blocked_host' ? 400 : 502, body: { error: dns.error, detail: dns.detail } };
+  const guard = makeHostGuard({ fetch: (u, i) => fetch(u, i), failClosed: false });
   const result = await checkServer(normalized, {
     fetch: (u, init) => fetch(u, init),
     timeoutMs: 8000,
+    deadlineMs: DEFAULT_DEADLINE_MS,
     userAgent: DEFAULT_UA,
+    validateUrl: guard,
   });
-  if (!result.reachable) return { http: 502, body: { error: 'unreachable', detail: result.error || 'no response' } };
-  const full = decorate(result, id);
+  if (!result.reachable) {
+    const detail = String(result.error || 'no response').replace(/^(unreachable|blocked_host|blocked_by_firewall|bad_url): /, '');
+    if (result.error_code === 'blocked_host') return { http: 400, body: { error: 'blocked_host', detail } };
+    if (result.error_code === 'blocked_by_firewall') return { http: 502, body: { error: 'blocked_by_firewall', detail } };
+    return { http: 502, body: { error: 'unreachable', detail } };
+  }
+  const full = scrubSecrets(decorate(result, id), secretParts(normalized));
   const writes = [env.RESULTS.put(`r:${id}`, JSON.stringify(full), { expirationTtl: RESULT_TTL_S })];
   if (!hadPrevious) {
     writes.push(sha256Hex(normalized).then((sha) => env.RESULTS.put(`u:${sha}`, id, { expirationTtl: RESULT_TTL_S })));
@@ -122,8 +112,45 @@ async function runCheck(normalized, id, env, ctx, hadPrevious) {
   return { http: 200, body: full };
 }
 
+// ---------- badge staleness: one background re-check per stale result ----------
+const refreshing = new Map(); // id -> last attempt (per isolate)
+
+/**
+ * When a stored result is older than STALE_MS, re-check it in the background (ctx.waitUntil) if the
+ * caller's rate budget allows. The re-check rewrites r:<id> with a fresh 30-day TTL.
+ * rawUrl is the URL from the request; without it, the stored url is used only when it is the
+ * full URL (its hash is the id, i.e. nothing was redacted).
+ */
+async function maybeRefresh(req, env, ctx, prev, id, rawUrl) {
+  if (!prev || !prev.checked_at) return false;
+  const age = Date.now() - Date.parse(prev.checked_at);
+  if (!(age > STALE_MS)) return false;
+  const last = refreshing.get(id);
+  if (last && Date.now() - last < REFRESH_RETRY_MS) return false;
+  let normalized = null;
+  try {
+    const cand = rawUrl || prev.url;
+    const safe = checkUrlSafety(cand);
+    if (safe.ok) {
+      const n = normalizeUrl(safe.url);
+      if ((await resultId(n)) === id) normalized = n;
+    }
+  } catch { /* not checkable */ }
+  if (!normalized) return false;
+  const tok = await takeToken(req, env);
+  if (!tok.ok) return false;
+  refreshing.set(id, Date.now());
+  if (refreshing.size > 2000) for (const [k, t] of refreshing) { if (Date.now() - t > REFRESH_RETRY_MS) refreshing.delete(k); }
+  ctx.waitUntil(runCheck(normalized, id, env, ctx, true).catch(() => {}));
+  return true;
+}
+
 async function readResult(env, id) {
-  try { return await env.RESULTS.get(`r:${id}`, 'json'); } catch { return null; }
+  let r = null;
+  try { r = await env.RESULTS.get(`r:${id}`, 'json'); } catch { return null; }
+  // Results stored by engine <= 1.1.0 may hold a path token in url and details: scrub on read.
+  if (r && typeof r.url === 'string') { try { r = scrubSecrets(r, secretParts(r.url)); } catch { /* keep */ } }
+  return r;
 }
 
 /**
@@ -160,7 +187,10 @@ async function handleBadgeByUrl(req, env, ctx, params) {
   const normalized = normalizeUrl(safe.url);
   const id = await resultId(normalized);
   const prev = await readResult(env, id);
-  if (prev) return svg(badgeSvg(prev), BADGE_MAX_AGE);
+  if (prev) {
+    await maybeRefresh(req, env, ctx, prev, id, normalized);
+    return svg(badgeSvg(prev), BADGE_MAX_AGE);
+  }
   const tok = await takeToken(req, env);
   if (!tok.ok) return svg(badgeSvg(null), UNCHECKED_MAX_AGE);
   const out = await runCheck(normalized, id, env, ctx, false);
@@ -181,7 +211,7 @@ function index() {
       mcp: 'POST /stamp/mcp (MCP Streamable HTTP, authless)',
     },
     mcp: MCP_INFO,
-    limits: { checks_per_hour_per_ip: LIMIT_PER_HOUR, result_cache_minutes: FRESH_MS / 60000 },
+    limits: { checks_per_hour_per_ip: LIMIT_PER_HOUR, result_cache_minutes: FRESH_MS / 60000, result_ttl_days: RESULT_TTL_S / 86400, badge_recheck_after_days: STALE_MS / 86400000, check_time_budget_s: DEFAULT_DEADLINE_MS / 1000 },
   };
 }
 
@@ -203,7 +233,7 @@ export default {
       if (path === '/' || path === '/api') return json(index());
       if (path === '/api/check') return await handleCheck(req, env, ctx, url.searchParams);
       if (path === '/api/checks') {
-        return json({ checks: CHECKS, stores: STORE_TITLES, store_ids: STORES, grades: { A: 90, B: 80, C: 65, D: 50, F: 0 }, status_values: { pass: 1, warn: 0.5, fail: 0, skip: null }, limited_cap: LIMITED_CAP }, 200, { 'cache-control': 'public, max-age=3600' });
+        return json({ checks: CHECKS, stores: STORE_TITLES, store_meaning: STORE_MEANING, skip_reasons: SKIP_REASONS, store_ids: STORES, grades: { A: 90, B: 80, C: 65, D: 50, F: 0 }, status_values: { pass: 1, warn: 0.5, fail: 0, skip: null }, limited_cap: LIMITED_CAP }, 200, { 'cache-control': 'public, max-age=3600' });
       }
       let m = path.match(/^\/api\/result\/([0-9a-f]{12})$/);
       if (m) {
@@ -214,6 +244,7 @@ export default {
       m = path.match(/^\/badge\/([0-9a-f]{12})(?:\.svg)?$/);
       if (m) {
         const r = await readResult(env, m[1]);
+        if (r) await maybeRefresh(req, env, ctx, r, m[1], null);
         return svg(badgeSvg(r), r ? BADGE_MAX_AGE : UNCHECKED_MAX_AGE);
       }
       return json({ error: 'not_found' }, 404);
