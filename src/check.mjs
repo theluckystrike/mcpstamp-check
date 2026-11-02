@@ -231,10 +231,10 @@ export function isFirewall(r) {
 
 function firewallLabel(r) {
   const h = r.headers || {};
-  const who = h['cf-mitigated'] || /cloudflare/i.test(h.server || '') ? 'Cloudflare ' : '';
-  if (h['cf-mitigated']) return `HTTP ${r.status} ${who}${h['cf-mitigated']} page`;
+  // Only cf-mitigated proves Cloudflare: inside a Worker every subrequest reports server: cloudflare.
+  if (h['cf-mitigated']) return `HTTP ${r.status} Cloudflare ${h['cf-mitigated']} page`;
   const ct = (r.contentType || '').split(';')[0] || 'no content type';
-  return `HTTP ${r.status} ${who}${ct.includes('html') ? 'HTML' : ct} block page`;
+  return `HTTP ${r.status} ${ct.includes('html') ? 'HTML' : ct} block page`;
 }
 
 class Ctx {
