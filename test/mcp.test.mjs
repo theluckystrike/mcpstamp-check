@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import worker from '../src/worker.mjs';
 import { checkServer, CHECKS } from '../src/check.mjs';
 import { normalizeUrl, resultId } from '../src/ssrf.mjs';
-import { AUDIT_LINE, TOOLS } from '../src/mcp.mjs';
+import { TOOLS } from '../src/mcp.mjs';
 
 function env() {
   const m = new Map();
@@ -144,8 +144,8 @@ test('check_mcp_server: cached result -> score, stores, fixes, badge, audit line
   assert.match(text, /ChatGPT Apps: NOT ready/);
   assert.match(text, /Fix: Add a title\./);
   assert.match(text, /\[!\[McpStamp\]\(https:\/\/www\.mcpstamp\.com\/badge\//);
-  assert.equal(text.trim().split('\n').pop(), AUDIT_LINE);
-  assert.equal(AUDIT_LINE, 'Need it fixed? Readiness Audit $490: https://www.mcpstamp.com/services/');
+  assert.match(text.trim().split('\n').pop(), /^README badge: /);
+  assert.doesNotMatch(text, /\$\d|Readiness Audit|services\//, 'no promotional text in tool output');
   const sc = res.structuredContent;
   assert.equal(sc.score, 72);
   assert.equal(sc.stores.gemini.ready, true);

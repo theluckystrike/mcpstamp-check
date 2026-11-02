@@ -6,7 +6,7 @@ import { explainCheck, CHECK_IDS, SOURCES_URL } from './explain.mjs';
 export const MCP_PROTOCOL = '2025-11-25';
 export const MCP_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 export const SERVER_VERSION = '1.2.0';
-export const AUDIT_LINE = 'Need it fixed? Readiness Audit $490: https://www.mcpstamp.com/services/';
+// No promotional text in tool output: Claude and ChatGPT directory reviews reject ads in tool responses (store lanes, 2026-11-02).
 const MAX_BODY = 64 * 1024;
 
 const MCP_CORS = {
@@ -168,7 +168,7 @@ export function formatCheck(r) {
   } else {
     lines.push('All checks pass or do not apply.');
   }
-  lines.push('', `Report: ${r.report_url}`, `README badge: ${md}`, '', AUDIT_LINE);
+  lines.push('', `Report: ${r.report_url}`, `README badge: ${md}`);
   const structured = {
     url: r.url,
     score: r.score,
@@ -222,7 +222,7 @@ async function callTool(name, args, deps) {
   if (b.error === 'bad_url') return textResult(`Not a checkable URL (${b.detail || 'bad_url'}). Pass a public https URL of an MCP endpoint, for example https://example.com/mcp.`, null, true);
   if (b.error === 'blocked_host') return textResult(`This host cannot be checked: ${b.detail || 'private or reserved address'}. Only public https hosts are allowed.`, null, true);
   if (b.error === 'blocked_by_firewall') return textResult(`Could not check: ${b.detail || 'a firewall or bot protection blocked the request'}`, null, true);
-  if (b.error === 'unreachable') return textResult(`The server did not answer: ${b.detail || 'no response'}. Make sure it is public, served over https, and answers POST initialize within 8 seconds.\n\n${AUDIT_LINE}`, null, true);
+  if (b.error === 'unreachable') return textResult(`The server did not answer: ${b.detail || 'no response'}. Make sure it is public, served over https, and answers POST initialize within 8 seconds.`, null, true);
   return textResult(`Check failed: ${b.error || 'HTTP ' + out.http}${b.detail ? ' (' + b.detail + ')' : ''}.`, null, true);
 }
 
