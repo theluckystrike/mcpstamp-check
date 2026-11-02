@@ -4,6 +4,8 @@ Score any remote MCP server for readiness for the **Claude Directory**, **ChatGP
 
 Try it: <https://www.mcpstamp.com/check/>
 
+Readiness Index: <https://www.mcpstamp.com/readiness/> ranks the remote servers listed in the official MCP Registry by this engine's score, with per-store readiness for each server.
+
 ## Badge
 
 After a check, embed your badge in your README (`<id>` is in the check result):
@@ -103,35 +105,40 @@ A trusted proxy (the mcpstamp.com Pages Functions) may send `x-mcpstamp-proxy-ke
 
 Each check is `pass` (1), `warn` (0.5), `fail` (0) or `skip` (not counted). Score = weighted pass ratio over the checks that apply. Grades: A >= 90, B >= 80, C >= 65, D >= 50, else F. Each store gets `status`: `ready` (no blocking check failed and none was skipped), `unverified` (none failed, but a blocking check could not run, for example tools behind sign-in) or `not_ready` (a blocking check failed). `ready` is true only for `ready`. When the tools sit behind sign-in and cannot be inspected, the score is capped at 85. Skipped checks carry `skip_reason`: `not_applicable`, `needs_sign_in`, `not_probed` (request or time budget), `not_reached` (handshake did not complete) or `blocked`; each store lists `unverified_reasons`. A check may carry `store_status` when one store treats it more softly (for example legacy SSE is a warning for Claude and the Registry). The `registry` store means "a valid remote for the MCP Registry" (public https, answers as Streamable HTTP or SSE), not that the server is published there.
 
-| Check | Group | What it tests | Weight | Counts for | Blocks |
-|---|---|---|---|---|---|
-| `https` | transport | Served over HTTPS | 10 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini, registry |
-| `initialize` | transport | initialize over Streamable HTTP | 15 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini, registry |
-| `protocol_version` | transport | Supported protocol version negotiated | 6 | claude, chatgpt, gemini, registry | gemini |
-| `content_type` | transport | JSON or SSE response Content-Type | 3 | claude, chatgpt, gemini, registry | - |
-| `jsonrpc_errors` | transport | JSON-RPC error for unknown method | 4 | claude, chatgpt, gemini, registry | - |
-| `get_stream` | transport | GET answers SSE or 405 | 3 | claude, chatgpt, gemini, registry | - |
-| `latency` | transport | initialize latency | 5 | claude, chatgpt, gemini, registry | - |
-| `server_info` | metadata | serverInfo name and version | 6 | claude, chatgpt, gemini, registry | - |
-| `instructions` | metadata | Server instructions | 4 | claude, chatgpt, gemini | - |
-| `capabilities_tools` | metadata | tools capability declared | 3 | claude, chatgpt, gemini, registry | - |
-| `auth_method` | auth | Sign-in method the store supports (OAuth or none) | 6 | claude, chatgpt, gemini | chatgpt, gemini |
-| `auth_challenge` | auth | 401 carries WWW-Authenticate resource_metadata | 6 | claude, chatgpt, gemini | - |
-| `auth_prm` | auth | Protected resource metadata (RFC 9728) | 8 | claude, chatgpt, gemini | claude, chatgpt |
-| `auth_resource` | auth | Resource metadata "resource" equals the server URL | 4 | claude, chatgpt, gemini | claude |
-| `auth_as_metadata` | auth | Authorization server metadata (RFC 8414 / OIDC) | 8 | claude, chatgpt, gemini | claude, chatgpt, gemini |
-| `auth_gemini_discovery` | auth | First metadata URL Gemini tries answers 200 with the required fields | 4 | gemini | gemini |
-| `auth_chatgpt_metadata` | auth | issuer equals the authorization_servers entry; token_endpoint_auth_methods_supported (ChatGPT) | 4 | chatgpt | chatgpt |
-| `auth_pkce` | auth | PKCE S256 advertised | 6 | claude, chatgpt, gemini | claude, chatgpt, gemini |
-| `auth_registration` | auth | Client registration (DCR or Client ID Metadata Documents) | 6 | claude, chatgpt, gemini | - |
-| `auth_refresh` | auth | refresh_token grant advertised | 3 | claude, chatgpt, gemini | - |
-| `tools_list` | tools | tools/list returns tools | 10 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini |
-| `tool_schema` | tools | inputSchema is an object schema | 6 | claude, chatgpt, gemini, registry | claude, chatgpt, gemini |
-| `tool_names` | tools | Tool names are valid and portable | 5 | claude, chatgpt, gemini, registry | - |
-| `tool_annotations` | tools | readOnlyHint or destructiveHint on every tool | 10 | claude, chatgpt, gemini | claude, chatgpt |
-| `tool_open_world` | tools | Explicit readOnlyHint, destructiveHint and openWorldHint (ChatGPT) | 5 | chatgpt | chatgpt |
-| `tool_titles` | tools | Human-readable title on every tool | 5 | claude, chatgpt, gemini | claude, chatgpt |
-| `tool_descriptions` | tools | Tool descriptions | 6 | claude, chatgpt, gemini | - |
+The table below is generated from the `CHECKS` export in `src/check.mjs` (`node scripts/scoring-table.mjs --write`; a test fails when it is out of date). "Blocks" lists the stores that are not ready when the check fails. `GET /api/checks` returns the same data plus the stores each check counts toward. Auth checks are skipped for servers without sign-in.
+
+<!-- scoring-table:start (generated by scripts/scoring-table.mjs from CHECKS) -->
+| Check | Group | What it tests | Weight | Blocks (fail = not ready) |
+|---|---|---|---|---|
+| `https` | transport | Served over HTTPS | 10 | claude, chatgpt, gemini, registry |
+| `initialize` | transport | initialize over Streamable HTTP | 15 | claude, chatgpt, gemini, registry |
+| `protocol_version` | transport | Supported protocol version negotiated | 6 | gemini |
+| `content_type` | transport | JSON or SSE response Content-Type | 3 | - |
+| `jsonrpc_errors` | transport | JSON-RPC error for unknown method | 4 | - |
+| `get_stream` | transport | GET answers SSE or 405 | 3 | - |
+| `latency` | transport | initialize latency | 5 | - |
+| `server_info` | metadata | serverInfo name and version | 6 | - |
+| `instructions` | metadata | Server instructions | 4 | - |
+| `capabilities_tools` | metadata | tools capability declared | 3 | - |
+| `auth_method` | auth | Sign-in method the store supports (OAuth or none) | 6 | chatgpt, gemini |
+| `auth_challenge` | auth | 401 carries WWW-Authenticate resource_metadata | 6 | - |
+| `auth_prm` | auth | Protected resource metadata (RFC 9728) | 8 | claude, chatgpt |
+| `auth_resource` | auth | Resource metadata "resource" equals the server URL | 4 | claude |
+| `auth_as_metadata` | auth | Authorization server metadata (RFC 8414 / OIDC) | 8 | claude, chatgpt, gemini |
+| `auth_gemini_discovery` | auth | First metadata URL Gemini tries answers 200 with the required fields | 4 | gemini |
+| `auth_chatgpt_metadata` | auth | issuer equals the authorization_servers entry; token_endpoint_auth_methods_supported (ChatGPT) | 4 | chatgpt |
+| `auth_pkce` | auth | PKCE S256 advertised | 6 | claude, chatgpt, gemini |
+| `auth_registration` | auth | Client registration (DCR or Client ID Metadata Documents) | 6 | - |
+| `auth_refresh` | auth | refresh_token grant advertised | 3 | - |
+| `tools_list` | tools | tools/list returns tools | 10 | claude, chatgpt, gemini |
+| `tool_schema` | tools | inputSchema is an object schema | 6 | claude, chatgpt, gemini |
+| `tool_names` | tools | Tool names are valid and portable | 5 | - |
+| `tool_annotations` | tools | readOnlyHint or destructiveHint on every tool | 10 | claude, chatgpt |
+| `tool_open_world` | tools | Explicit readOnlyHint, destructiveHint and openWorldHint (ChatGPT) | 5 | chatgpt |
+| `tool_titles` | tools | Human-readable title on every tool | 5 | claude, chatgpt |
+| `tool_descriptions` | tools | Tool descriptions | 6 | - |
+| | | **Total weight (all checks)** | **161** | |
+<!-- scoring-table:end -->
 
 Every rule is traced to the store or spec text in [SOURCES.md](SOURCES.md).
 
